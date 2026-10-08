@@ -49,6 +49,9 @@ impl Checker {
 
     // Go: checker/checker.go:17142 padObjectLiteralType
     pub fn pad_object_literal_type(&mut self, t: TypeId, pattern: Node) -> TypeId {
+        // An element that the parameter's annotation or contextual type already types is not
+        // padded: padding would replace that type with the element's own (implicitly any) type.
+        let declared_type = self.get_declared_type_of_parameter_binding_pattern(pattern);
         let mut missing_elements: Vec<Node> = Vec::new();
         for e in pattern.elements().iter() {
             if has_dot_dot_dot_token(e) {
@@ -57,6 +60,13 @@ impl Checker {
             let name = self.get_property_name_from_binding_element(e);
             if name != INTERNAL_SYMBOL_NAME_MISSING && self.get_property_of_type(t, &name).is_nil()
             {
+                if declared_type.is_some()
+                    && self
+                        .get_type_of_property_of_type(declared_type, &name)
+                        .is_some()
+                {
+                    continue;
+                }
                 missing_elements.push(e);
             }
         }
@@ -86,6 +96,36 @@ impl Checker {
         let object_flags = self.ty(t).object_flags;
         self.ty_mut(result).object_flags = object_flags;
         result
+    }
+
+    // Not in the pinned Go. The type that an object binding pattern of a parameter destructures
+    // when the parameter's type annotation or its contextual signature supplies one. It never
+    // consults an initializer, so it is safe to call while checking one.
+    pub fn get_declared_type_of_parameter_binding_pattern(&mut self, pattern: Node) -> TypeId {
+        let parent = pattern.parent();
+        let t = if is_binding_element(parent) {
+            if !is_object_binding_pattern(parent.parent()) {
+                return TypeId::NIL;
+            }
+            let outer = self.get_declared_type_of_parameter_binding_pattern(parent.parent());
+            let name = self.get_property_name_from_binding_element(parent);
+            if outer.is_nil() || name == INTERNAL_SYMBOL_NAME_MISSING {
+                return TypeId::NIL;
+            }
+            self.get_type_of_property_of_type(outer, &name)
+        } else if is_parameter_declaration(parent) {
+            if parent.type_().is_some() {
+                self.get_type_from_type_node(parent.type_())
+            } else {
+                self.get_contextually_typed_parameter_type(parent)
+            }
+        } else {
+            TypeId::NIL
+        };
+        if t.is_nil() {
+            return TypeId::NIL;
+        }
+        self.get_non_nullable_type(t)
     }
 
     // Go: checker/checker.go:17170 getPropertyNameFromBindingElement
